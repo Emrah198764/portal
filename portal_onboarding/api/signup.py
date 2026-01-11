@@ -165,7 +165,10 @@ def verify_token(token: str):
         "Portal Signup Request",
         {"verification_token": token},
         "name"
-    )ox (including Spam).
+    )
+
+    if not signup_name:
+        logger.warning("VERIFY_TOKEN | INVALID TOKEN")
         frappe.throw("Invalid verification link")
 
     doc = frappe.get_doc("Portal Signup Request", signup_name)
