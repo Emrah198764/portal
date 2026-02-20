@@ -1,203 +1,178 @@
-
-import frappe
 import uuid
-from frappe.rate_limiter import rate_limit
-from frappe.utils import add_to_date, get_url, now_datetime, validate_email_address
+from datetime import datetime, timedelta
 
+# -----------------------------
+# MOCK DATABASE (In-Memory)
+# -----------------------------
+mock_db = {}
 
-def _get_verify_base_url():
-    portal_base_url = frappe.conf.get("portal_base_url")
-    return portal_base_url.rstrip("/") if portal_base_url else get_url()
+# -----------------------------
+# UTILITIES
+# -----------------------------
+def now():
+    return datetime.now()
 
+def generate_token():
+    return str(uuid.uuid4())
 
-@frappe.whitelist(allow_guest=True)
-@rate_limit(key="email", limit=5, seconds=60)
-def start_signup(full_name: str, email: str):
-    logger = frappe.logger("portal_signup")
-    logger.info("START_SIGNUP | ENTRY")
+def print_divider():
+    print("\n" + "=" * 50)
 
-    # 1️⃣ VALIDATION
+# -----------------------------
+# MOCK EMAIL SENDER (NO NETWORK)
+# -----------------------------
+def mock_sendmail(email, subject, message):
+    print_divider()
+    print("📧 MOCK EMAIL SENT")
+    print(f"To      : {email}")
+    print(f"Subject : {subject}")
+    print(f"Message : {message}")
+    print_divider()
+    return True
+
+# -----------------------------
+# SIGNUP FUNCTION
+# -----------------------------
+def start_signup(full_name, email):
+    print_divider()
+    print("🚀 START SIGNUP")
+
     if not full_name or not email:
-        frappe.throw("Full name and email are required")
+        print("❌ Validation Failed")
+        return {"success": False, "message": "Full name & email required"}
 
-    clean_full_name = full_name.strip()
     email = email.strip().lower()
-    if not validate_email_address(email, throw=False):
-        frappe.throw("Invalid email address")
-    now = now_datetime()
+    full_name = full_name.strip()
 
-    # 2️⃣ EXISTING CHECK
-    existing = frappe.db.get_value(
-        "Portal Signup Request",
-        {"email": email},
-        [
-            "name",
-            "status",
-            "verification_token",
-            "token_expiry",
-            "full_name",
-        ],
-        as_dict=True
-    )
+    existing = mock_db.get(email)
 
-    if existing:
-        logger.info(
-            "START_SIGNUP | EXISTING: name=%s status=%s token=*** expiry=%s",
-            existing.name,
-            existing.status,
-            existing.token_expiry,
+    # -------------------------
+    # Already Verified
+    # -------------------------
+    if existing and existing["status"] == "Verified":
+        print("⚠ Email Already Verified")
+        return {"success": False, "message": "Email already verified"}
+
+    # -------------------------
+    # Token Still Valid → Reuse
+    # -------------------------
+    if existing and existing["token_expiry"] > now():
+        print("♻ Reusing Existing Token")
+
+        verify_url = f"http://mock.local/verify?token={existing['token']}"
+
+        mock_sendmail(
+            email=email,
+            subject="Email Verification",
+            message=f"Reuse Link → {verify_url}"
         )
-    else:
-        logger.info("START_SIGNUP | EXISTING: None")
-
-    # 3️⃣ ALREADY VERIFIED
-    if existing and existing.status == "Verified":
-        logger.warning("START_SIGNUP | EMAIL ALREADY VERIFIED")
-        frappe.throw(
-            "This email address has already been verified. Please sign in."
-        )
-
-    # 4️⃣ TOKEN STILL VALID → REUSE
-    if (
-        existing
-        and existing.verification_token
-        and existing.token_expiry
-        and existing.token_expiry > now
-    ):
-        logger.info("START_SIGNUP | REUSING EXISTING TOKEN")
-
-        verify_url = f"{_get_verify_base_url()}/verify?token={existing.verification_token}"
-
-        display_name = existing.full_name or clean_full_name
-        try:
-            frappe.sendmail(
-                recipients=[email],
-                subject="Email Verification",
-                message=f"""
-                    Hello {display_name},<br><br>
-                    Your previously sent verification link is still valid:<br><br>
-                    <a href="{verify_url}">Verify My Email</a><br><br>
-                    This link is valid until it expires.
-                """
-            )
-        except Exception:
-            doc = frappe.get_doc("Portal Signup Request", existing.name)
-            doc.status = "Email Failed"
-            doc.save(ignore_permissions=True)
-            logger.exception("START_SIGNUP | REUSE TOKEN EMAIL FAILED")
-            frappe.throw("Verification email could not be sent. Please try again.")
 
         return {
             "success": True,
-            "message": (
-                "A verification email has already been sent. "
-                "Please check your inbox (including Spam)."
-            )
+            "message": "Verification email already sent"
         }
 
-    # 5️⃣ NEW TOKEN (CREATE OR UPDATE EXISTING)
-    token = str(uuid.uuid4())
-    expiry = add_to_date(now, hours=1)
+    # -------------------------
+    # New Token
+    # -------------------------
+    token = generate_token()
+    expiry = now() + timedelta(hours=1)
 
-    logger.info(f"START_SIGNUP | NEW TOKEN GENERATED | EXPIRY={expiry}")
+    mock_db[email] = {
+        "full_name": full_name,
+        "token": token,
+        "token_expiry": expiry,
+        "status": "Email Sent"
+    }
 
-    if existing:
-        doc = frappe.get_doc("Portal Signup Request", existing.name)
-        doc.full_name = clean_full_name
-        doc.verification_token = token
-        doc.token_expiry = expiry
-        doc.is_verified = 0
-        doc.status = "Email Sent"
-        doc.save(ignore_permissions=True)
-    else:
-        doc = frappe.get_doc({
-            "doctype": "Portal Signup Request",
-            "full_name": clean_full_name,
-            "email": email,
-            "verification_token": token,
-            "token_expiry": expiry,
-            "is_verified": 0,
-            "status": "Email Sent"
-        })
+    verify_url = f"http://mock.local/verify?token={token}"
 
-        doc.insert(ignore_permissions=True)
+    print("✅ New Token Generated")
+    print(f"Token  : {token}")
+    print(f"Expiry : {expiry}")
 
-    verify_url = f"{_get_verify_base_url()}/verify?token={token}"
-
-    try:
-        frappe.sendmail(
-            recipients=[email],
-            subject="Email Verification",
-            message=f"""
-                Hello {clean_full_name},<br><br>
-                To continue your registration, click the link below:<br><br>
-                <a href="{verify_url}">Verify My Email</a><br><br>
-                This link is valid for 1 hour.
-            """
-        )
-    except Exception:
-        doc.status = "Email Failed"
-        doc.save(ignore_permissions=True)
-        logger.exception("START_SIGNUP | EMAIL SEND FAILED")
-        frappe.throw("Verification email could not be sent. Please try again.")
-
-    logger.info("START_SIGNUP | EMAIL SENT")
+    mock_sendmail(
+        email=email,
+        subject="Email Verification",
+        message=f"New Link → {verify_url}"
+    )
 
     return {
         "success": True,
-        "message": "Verification email sent. Please check your email."
+        "message": "Verification email sent"
     }
 
-
-
-
-
-@frappe.whitelist(allow_guest=True)
-@rate_limit(key="token", limit=10, seconds=60)
-def verify_token(token: str):
-    logger = frappe.logger("portal_signup")
-    logger.info("VERIFY_TOKEN | ENTRY")
+# -----------------------------
+# VERIFY FUNCTION
+# -----------------------------
+def verify_token(token):
+    print_divider()
+    print("🔍 VERIFY TOKEN")
 
     if not token:
-        frappe.throw("Token not found")
+        print("❌ Token Missing")
+        return {"success": False, "message": "Token missing"}
 
-    signup_name = frappe.db.get_value(
-        "Portal Signup Request",
-        {"verification_token": token},
-        "name"
-    )
+    for email, record in mock_db.items():
 
-    if not signup_name:
-        logger.warning("VERIFY_TOKEN | INVALID TOKEN")
-        frappe.throw("Invalid verification link")
+        if record["token"] == token:
 
-    doc = frappe.get_doc("Portal Signup Request", signup_name)
+            # ---------------------
+            # Expired
+            # ---------------------
+            if record["token_expiry"] < now():
+                print("⏰ Token Expired")
+                record["status"] = "Expired"
+                return {"success": False, "message": "Token expired"}
 
-    # ⏰ EXPIRY CHECK
-    if doc.token_expiry and doc.token_expiry < now_datetime():
-        logger.warning("VERIFY_TOKEN | TOKEN EXPIRED")
-        doc.status = "Expired"
-        doc.save(ignore_permissions=True)
-        frappe.throw("Verification link has expired")
+            # ---------------------
+            # Already Verified
+            # ---------------------
+            if record["status"] == "Verified":
+                print("⚠ Already Verified")
+                return {"success": True, "message": "Already verified"}
 
-    # ✅ ALREADY VERIFIED
-    if doc.status == "Verified":
-        logger.info("VERIFY_TOKEN | ALREADY VERIFIED")
-        return {
-            "success": True,
-            "message": "Email already verified"
-        }
+            # ---------------------
+            # Verify Success
+            # ---------------------
+            record["status"] = "Verified"
+            record["token"] = None
+            record["token_expiry"] = None
 
-    # ✅ VERIFY
-    doc.is_verified = 1
-    doc.status = "Verified"
-    doc.verification_token = None
-    doc.token_expiry = None
-    doc.save(ignore_permissions=True)
+            print("✅ Verification Successful")
+            print(f"User : {record['full_name']}")
+            print(f"Mail : {email}")
 
-    logger.info("VERIFY_TOKEN | SUCCESS")
+            return {"success": True, "message": "Email verified"}
 
-    return {
-        "success": True,
-        "message": "Email verified successfully"
-    }
+    print("❌ Invalid Token")
+    return {"success": False, "message": "Invalid token"}
+
+# -----------------------------
+# TEST FLOW (AUTO RUN)
+# -----------------------------
+if __name__ == "__main__":
+
+    print("\n🎯 MOCK SIGNUP SYSTEM TEST")
+
+    # 1️⃣ First Signup
+    response = start_signup("Emrah Turk", "test@mail.com")
+    print(response)
+
+    # 2️⃣ Try Signup Again (Reuse Token)
+    response = start_signup("Emrah Turk", "test@mail.com")
+    print(response)
+
+    # 3️⃣ Grab Token
+    token = mock_db["test@mail.com"]["token"]
+
+    # 4️⃣ Verify Token
+    response = verify_token(token)
+    print(response)
+
+    # 5️⃣ Verify Again (Already Verified)
+    response = verify_token(token)
+    print(response)
+
+    print_divider()
+    print("✅ TEST COMPLETED")
